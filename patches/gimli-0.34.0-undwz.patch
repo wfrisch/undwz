@@ -1,0 +1,222 @@
+# undwz modifications to gimli 0.34.0
+# Apply from the gimli-0.34.0 source root with: patch -p1 < this-file
+# 1) line.rs: fix u8->i8 cast in line-program writer assertions (line_range up to 255)
+# 2) unit.rs: inline .gnu_debugaltlink supplementary units and resolve alt-references
+--- a/src/write/line.rs
++++ b/src/write/line.rs
+@@ -109,7 +109,7 @@
+         // We require a special opcode for a line advance of 0.
+         // See the debug_asserts in generate_row().
+         assert!(line_encoding.line_base <= 0);
+-        assert!(line_encoding.line_base + line_encoding.line_range as i8 > 0);
++        assert!(line_encoding.line_base as i16 + line_encoding.line_range as i16 > 0);
+         let mut program = LineProgram {
+             none: false,
+             encoding,
+@@ -442,7 +442,7 @@
+         let special_base = u64::from(OPCODE_BASE);
+         // TODO: handle lack of special opcodes for 0 line advance
+         debug_assert!(self.line_encoding.line_base <= 0);
+-        debug_assert!(self.line_encoding.line_base + self.line_encoding.line_range as i8 >= 0);
++        debug_assert!(self.line_encoding.line_base as i16 + self.line_encoding.line_range as i16 >= 0);
+         let special_default = special_base.wrapping_sub(line_base);
+         let mut special = special_default;
+         let mut use_special = false;
+--- a/src/write/unit.rs
++++ b/src/write/unit.rs
+@@ -2114,7 +2114,9 @@
+     #[derive(Debug)]
+     pub struct ConvertUnitSection<'a, R: Reader<Offset = usize>> {
+         read_dwarf: &'a read::Dwarf<R>,
+-        read_units: Vec<(read::Unit<R>, UnitId)>,
++        // The bool marks a unit that comes from the supplementary (.dwz) file
++        // (via .gnu_debugaltlink) rather than the main .debug_info.
++        read_units: Vec<(read::Unit<R>, UnitId, bool)>,
+         /// The next unit in `read_units` to return from `read_unit`.
+         read_unit_index: usize,
+         /// The associated skeleton unit if this is a split DWARF section.
+@@ -2122,6 +2124,12 @@
+         /// If this is set then `read_units` will contain exactly one unit.
+         read_skeleton_unit: Option<read::UnitRef<'a, R>>,
+         entry_ids: FnvHashMap<UnitSectionOffset, (UnitId, UnitEntryId)>,
++        /// Entry ids for units pulled in from the supplementary file. Keyed by
++        /// offset into the *supplementary* .debug_info, which shares the flat
++        /// UnitSectionOffset space with the main section and would otherwise
++        /// collide, hence a separate map. Used to resolve alt-references
++        /// (DW_FORM_GNU_ref_alt) so the output is self-contained.
++        sup_entry_ids: FnvHashMap<UnitSectionOffset, (UnitId, UnitEntryId)>,
+         dwarf: &'a mut Dwarf,
+     }
+ 
+@@ -2137,6 +2145,7 @@
+                 read_unit_index: 0,
+                 read_skeleton_unit: None,
+                 entry_ids: FnvHashMap::default(),
++                sup_entry_ids: FnvHashMap::default(),
+                 dwarf,
+             };
+ 
+@@ -2147,7 +2156,19 @@
+             while let Some(read_unit) = read_units.next()? {
+                 let read_unit = read_dwarf.unit(read_unit)?;
+                 read_entry_offsets(&read_unit, &mut offsets)?;
+-                convert.reserve_unit(read_unit, &offsets);
++                convert.reserve_unit(read_unit, &offsets, false);
++            }
++
++            // Pull in the supplementary (.dwz) file's units so that
++            // alt-references can be resolved and inlined, making the output
++            // self-contained. These become ordinary units in the output.
++            if let Some(sup) = read_dwarf.sup() {
++                let mut sup_units = sup.units();
++                while let Some(read_unit) = sup_units.next()? {
++                    let read_unit = sup.unit(read_unit)?;
++                    read_entry_offsets(&read_unit, &mut offsets)?;
++                    convert.reserve_unit(read_unit, &offsets, true);
++                }
+             }
+ 
+             Ok(convert)
+@@ -2168,6 +2189,7 @@
+                 read_unit_index: 0,
+                 read_skeleton_unit: filter.skeleton_unit,
+                 entry_ids: FnvHashMap::default(),
++                sup_entry_ids: FnvHashMap::default(),
+                 dwarf,
+             };
+ 
+@@ -2184,7 +2206,7 @@
+                     }
+                     end += 1;
+                 }
+-                convert.reserve_unit(unit, &offsets[start..end]);
++                convert.reserve_unit(unit, &offsets[start..end], false);
+             }
+             debug_assert_eq!(end, offsets.len());
+ 
+@@ -2194,19 +2216,24 @@
+         /// Create a placeholder for each entry in a unit.
+         ///
+         /// This allows us to assign IDs to entries before they are created.
+-        fn reserve_unit(&mut self, unit: read::Unit<R>, offsets: &[UnitSectionOffset]) {
++        fn reserve_unit(&mut self, unit: read::Unit<R>, offsets: &[UnitSectionOffset], is_sup: bool) {
+             let root_offset = unit.header.root_offset().to_unit_section_offset(&unit);
+ 
+             let unit_id = self
+                 .dwarf
+                 .units
+                 .add(Unit::new(unit.encoding(), LineProgram::none()));
+-            self.read_units.push((unit, unit_id));
++            self.read_units.push((unit, unit_id, is_sup));
+             let unit = self.dwarf.units.get_mut(unit_id);
+ 
+-            self.entry_ids.insert(root_offset, (unit_id, unit.root()));
++            let map = if is_sup {
++                &mut self.sup_entry_ids
++            } else {
++                &mut self.entry_ids
++            };
++            map.insert(root_offset, (unit_id, unit.root()));
+             for offset in offsets {
+-                self.entry_ids.insert(*offset, (unit_id, unit.reserve()));
++                map.insert(*offset, (unit_id, unit.reserve()));
+             }
+         }
+ 
+@@ -2219,19 +2246,35 @@
+         pub fn read_unit(
+             &mut self,
+         ) -> ConvertResult<Option<(ConvertUnit<'_, R>, ConvertUnitEntry<'_, R>)>> {
+-            let Some((read_unit, unit_id)) = self.read_units.get(self.read_unit_index) else {
++            let Some((read_unit, unit_id, is_sup)) = self.read_units.get(self.read_unit_index) else {
+                 return Ok(None);
+             };
++            let is_sup = *is_sup;
+             self.read_unit_index += 1;
+ 
+-            let read_unit = read_unit.unit_ref(self.read_dwarf);
++            // Supplementary units are read from the sup dwarf and resolve their
++            // own (intra-sup) references via sup_entry_ids. Main units resolve
++            // intra-main references via entry_ids and alt-references (into the
++            // sup) via sup_entry_ids.
++            let read_dwarf = if is_sup {
++                self.read_dwarf.sup().expect("sup unit without sup dwarf")
++            } else {
++                self.read_dwarf
++            };
++            let read_unit = read_unit.unit_ref(read_dwarf);
++            let (own_ids, sup_ids) = if is_sup {
++                (&self.sup_entry_ids, None)
++            } else {
++                (&self.entry_ids, Some(&self.sup_entry_ids))
++            };
+ 
+             let mut unit = ConvertUnit {
+                 read_unit,
+                 read_skeleton_unit: self.read_skeleton_unit,
+                 unit_id: *unit_id,
+                 unit: self.dwarf.units.get_mut(*unit_id),
+-                entry_ids: &self.entry_ids,
++                entry_ids: own_ids,
++                sup_entry_ids: sup_ids,
+                 line_strings: &mut self.dwarf.line_strings,
+                 strings: &mut self.dwarf.strings,
+                 line_program_files: Vec::new(),
+@@ -2348,6 +2391,7 @@
+                 unit_id: self.unit_id,
+                 unit: self.unit,
+                 entry_ids: &self.entry_ids,
++                sup_entry_ids: None,
+                 line_strings: self.line_strings,
+                 strings: self.strings,
+                 line_program_files: Vec::new(),
+@@ -2460,6 +2504,9 @@
+         pub strings: &'a mut write::StringTable,
+         line_program_files: Vec<FileId>,
+         entry_ids: &'a FnvHashMap<UnitSectionOffset, (UnitId, UnitEntryId)>,
++        /// Entry ids for supplementary (.dwz) units, used to resolve and inline
++        /// alt-references. `None` when converting a supplementary unit itself.
++        sup_entry_ids: Option<&'a FnvHashMap<UnitSectionOffset, (UnitId, UnitEntryId)>>,
+         read_entries: read::EntriesRaw<'a, R>,
+         parents: Vec<(isize, UnitEntryId)>,
+     }
+@@ -2827,7 +2874,18 @@
+                     // TODO: must not be in the skeleton unit
+                     AttributeValue::DebugInfoRef(self.convert_debug_info_ref(val)?)
+                 }
+-                read::AttributeValue::DebugInfoRefSup(val) => AttributeValue::DebugInfoRefSup(val),
++                read::AttributeValue::DebugInfoRefSup(val) => {
++                    // Resolve alt-reference (DW_FORM_GNU_ref_alt) to the inlined
++                    // supplementary DIE, so the output is self-contained.
++                    match self
++                        .sup_entry_ids
++                        .and_then(|m| m.get(&UnitSectionOffset(val.0)))
++                    {
++                        Some(id) => AttributeValue::DebugInfoRef(DebugInfoRef::Entry(id.0, id.1)),
++                        // No supplementary file (or unmapped offset): leave as-is.
++                        None => AttributeValue::DebugInfoRefSup(val),
++                    }
++                }
+                 read::AttributeValue::DebugLineRef(val) => {
+                     // There should only be a ref to the line program in the CU DIE.
+                     if Some(val)
+@@ -2872,7 +2930,18 @@
+                     let id = self.strings.add(r.to_slice()?);
+                     AttributeValue::StringRef(id)
+                 }
+-                read::AttributeValue::DebugStrRefSup(val) => AttributeValue::DebugStrRefSup(val),
++                read::AttributeValue::DebugStrRefSup(val) => {
++                    // Resolve alt-string (DW_FORM_GNU_strp_alt) by copying the
++                    // string from the supplementary .debug_str inline.
++                    match read_unit.dwarf.sup() {
++                        Some(sup) => {
++                            let r = sup.debug_str.get_str(val)?;
++                            let id = self.strings.add(r.to_slice()?);
++                            AttributeValue::StringRef(id)
++                        }
++                        None => AttributeValue::DebugStrRefSup(val),
++                    }
++                }
+                 read::AttributeValue::DebugStrOffsetsIndex(index) => {
+                     let offset = read_unit.string_offset(index)?;
+                     let r = read_unit.string(offset)?;

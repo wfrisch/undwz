@@ -1,0 +1,15 @@
+[package]
+name = "undwz"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gimli = { version = "0.34.0", features = ["read", "write"] }
+object = "0.39.1"
+
+# undwz needs a patched gimli (line-writer u8/i8 fix + supplementary/.dwz
+# inlining). The repo ships only patches/gimli-0.34.0-undwz.patch; run
+# ./setup-vendor.sh once to materialize vendor/gimli (gitignored) that this
+# override points at. See README.md.
+[patch.crates-io]
+gimli = { path = "vendor/gimli" }

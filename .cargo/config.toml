@@ -1,0 +1,6 @@
+# Force the GCC driver as the linker. Some rustc builds (e.g. installed from a
+# source tarball) default to `clang`, which may be absent. `cc` (GCC) is present
+# on essentially every Linux toolchain. Remove this file if your rustc already
+# links with the correct default.
+[target.x86_64-unknown-linux-gnu]
+linker = "cc"
