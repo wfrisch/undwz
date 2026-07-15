@@ -1,3 +1,6 @@
+> NOTICE: This is merely a one-off experiment. I do NOT intend to maintain or
+> support this.
+
 # undwz — normalize dwz-optimized DWARF for Ghidra
 
 Ghidra cannot parse `DW_UT_partial` compilation units and throws
@@ -84,15 +87,18 @@ apply with `patch -p1`).
 ## Usage
 
 ```sh
-# Merge a binary with its debug info first (sibling script), then normalize:
-../gather_debuginfo.py -o out /usr/bin/bash
-undwz out/bash -o out/bash.ghidra
+# One shot: the sibling meta script locates the target's debug info, runs undwz,
+# and merges everything into a single self-contained ELF:
+./gather_for_ghidra.py /usr/bin/bash -o bash.ghidra
+
+# Or run undwz directly on an ELF that already carries its DWARF:
+undwz bash.with-debug -o bash.ghidra
 
 # Report only (no output file):
-undwz out/bash
+undwz bash.with-debug
 
 # Keep .note.gnu.build-id / .gnu_debuglink (stripped by default):
-undwz out/bash -o out/bash.ghidra --keep-links
+undwz bash.with-debug -o bash.ghidra --keep-links
 ```
 
 Typical run:

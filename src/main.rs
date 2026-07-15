@@ -1,6 +1,5 @@
 //! undwz — reassemble dwz-optimized DWARF into self-contained DWARF that Ghidra
-//! can load (no DW_UT_partial unit headers, and — eventually — no
-//! .gnu_debugaltlink references).
+//! can load: no DW_UT_partial unit headers and no .gnu_debugaltlink references.
 //!
 //! Pipeline:
 //!   1. open an ELF, load its DWARF (and, if present, the .gnu_debugaltlink
@@ -11,13 +10,12 @@
 //!      unit headers Ghidra chokes on (NSA/ghidra#6850). The rebuilt .debug_*
 //!      sections are spliced back into a copy of the input ELF with objcopy.
 //!
-//! STATUS
-//!   * No-altlink inputs (bash, libc, libtinfo, ld-linux, ...): fully handled —
-//!     output is self-contained.
-//!   * Altlink inputs (dwz multifile, e.g. cpio): gimli preserves supplementary
-//!     references (as DWARF5 DW_FORM_*_sup), so the result is NOT yet
-//!     self-contained. The tool refuses -o for these until sup-resolution
-//!     (inlining the .dwz content) is implemented. Use --force to emit anyway.
+//! STATUS: fully handled for both no-altlink inputs (bash, libc, libtinfo,
+//! ld-linux, ...) and dwz multifile/altlink inputs (e.g. cpio). The vendored
+//! gimli converter pulls the supplementary (.dwz) units into the output and
+//! resolves every alt-reference (DW_FORM_GNU_ref_alt/strp_alt), so the result is
+//! always self-contained: no DW_UT_partial headers, no alt forms, no
+//! .gnu_debugaltlink.
 
 use std::borrow::Cow;
 use std::error::Error;
