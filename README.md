@@ -19,16 +19,23 @@ programs.
 
 | Input | Result |
 |-------|--------|
-| **No `.gnu_debugaltlink`** (bash, libc, libtinfo, ld-linux, …) | ✅ **Fully handled.** Output is self-contained: all units `DW_UT_compile`, line info preserved, `readelf`/`llvm-dwarfdump` clean. |
-| **Has `.gnu_debugaltlink`** (dwz `-m` multifile, e.g. cpio) | ✅ **Fully handled.** The supplementary (`.dwz`) units are pulled in as ordinary units and every alt-reference (`DW_FORM_GNU_ref_alt`/`strp_alt`) is inlined/resolved. Output is self-contained: no alt forms, no `.gnu_debugaltlink`. Verified: e.g. cpio → 184 main + 121 sup = 305 units, all `DW_UT_compile`, 0 alt refs, 0 `llvm-dwarfdump` errors. |
+| **`.gnu_debuglink`** (bash, libc, libtinfo, ld-linux, …) | ✅ **Fully handled.** Output is self-contained: all units `DW_UT_compile`, line info preserved, `readelf`/`llvm-dwarfdump` clean. |
+| **`.gnu_debugaltlink`** (dwz `-m` multifile, e.g. cpio) | ✅ **Fully handled.** The supplementary (`.dwz`) units are pulled in as ordinary units and every alt-reference (`DW_FORM_GNU_ref_alt`/`strp_alt`) is inlined/resolved. Output is self-contained: no alt forms, no `.gnu_debugaltlink`. Verified: e.g. cpio → 184 main + 121 sup = 305 units, all `DW_UT_compile`, 0 alt refs. |
 
 ### Verification
 A simple way to check if an ELF contains problematic `DW_UT_partial` units:
 ```
-readelf --debug-dump=info SOME_ELF_WITH_DEBUGINFO | grep -i 'Unit Type' |sort -u
-```
+BINARY=/some/elf/with/debuginfo
 
-The output shout not contain `DW_UT_partial`.
+# This should not list any `DW_UT_partial`:
+$ readelf --debug-dump=info "$BINARY" | grep -i 'Unit Type' |sort -u
+   Unit Type:     DW_UT_compile (1)
+
+# This should not list any sections:
+$ readelf -x .gnu_debugaltlink -x .gnu_debuglink "$BINARY"
+readelf: Warning: Section '.gnu_debuglink' was not dumped because it does not exist
+readelf: Warning: Section '.gnu_debugaltlink' was not dumped because it does not exist
+```
 
 ### External debug links are stripped by default
 
