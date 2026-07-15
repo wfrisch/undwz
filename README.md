@@ -22,6 +22,14 @@ programs.
 | **No `.gnu_debugaltlink`** (bash, libc, libtinfo, ld-linux, …) | ✅ **Fully handled.** Output is self-contained: all units `DW_UT_compile`, line info preserved, `readelf`/`llvm-dwarfdump` clean. |
 | **Has `.gnu_debugaltlink`** (dwz `-m` multifile, e.g. cpio) | ✅ **Fully handled.** The supplementary (`.dwz`) units are pulled in as ordinary units and every alt-reference (`DW_FORM_GNU_ref_alt`/`strp_alt`) is inlined/resolved. Output is self-contained: no alt forms, no `.gnu_debugaltlink`. Verified: e.g. cpio → 184 main + 121 sup = 305 units, all `DW_UT_compile`, 0 alt refs, 0 `llvm-dwarfdump` errors. |
 
+### Verification
+A simple way to check if an ELF contains problematic `DW_UT_partial` units:
+```
+readelf --debug-dump=info SOME_ELF_WITH_DEBUGINFO | grep -i 'Unit Type' |sort -u
+```
+
+The output shout not contain `DW_UT_partial`.
+
 ### External debug links are stripped by default
 
 To keep the output unambiguously self-contained, `undwz` removes
