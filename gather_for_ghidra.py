@@ -194,7 +194,14 @@ def main():
 
         # 3. Drop external-debug links so Ghidra uses the embedded DWARF and
         #    isn't lured back to the system's original dwz'd debug file.
-        strip = present_sections(output, [".note.gnu.build-id", ".gnu_debuglink"])
+        #    .gnu_debugaltlink matters here: undwz strips it from the debug file
+        #    and inlines the supplementary units, but eu-unstrip re-merges it
+        #    from the stripped target binary (which ships its own copy). Left in,
+        #    Ghidra would follow it to the system .dwz file and load its
+        #    DW_UT_partial units again.
+        strip = present_sections(
+            output, [".note.gnu.build-id", ".gnu_debuglink", ".gnu_debugaltlink"]
+        )
         if strip:
             cmd = ["objcopy"]
             for s in strip:
